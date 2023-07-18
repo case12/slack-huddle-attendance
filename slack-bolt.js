@@ -1,8 +1,10 @@
 const { App } = require("@slack/bolt");
+const _ = require("lodash");
 require("dotenv").config();
 
 // Keep track of all the channels that a tally has been requested
 const channelsRequestedSet = new Set();
+const channelIdToMessageTs = {};
 
 // Variables to grab the botId and botUserId for filtering / deleting bot messages
 let botId;
@@ -53,7 +55,7 @@ async function getMemberInfo(memberId) {
 async function updateMonitoredChannels() {
   await Promise.all(
     Array.from(channelsRequestedSet).map((channelId) =>
-      postMessageInChannel(channelId)
+      throttledUpdateMessage(channelId)
     )
   );
 }
@@ -69,7 +71,11 @@ async function getAttendanceString(channel_id) {
     .map((memberInfo) =>
       memberInfo.id !== botUserId &&
       memberInfo.profile.huddle_state !== "in_a_huddle"
-        ? `${memberInfo.profile.last_name}?`
+        ? `${
+            memberInfo.profile.display_name ||
+            memberInfo.profile.last_name ||
+            memberInfo.profile.first_name
+          }?`
         : undefined
     )
     .filter((v) => v)
@@ -79,13 +85,31 @@ async function getAttendanceString(channel_id) {
   return channelMessage;
 }
 
-async function postMessageInChannel(channel_id) {
+async function postMessage(channel_id) {
   await deleteBotMessages(channel_id);
   const attendanceString = await getAttendanceString(channel_id);
 
-  await app.client.chat.postMessage({
+  const result = await app.client.chat.postMessage({
     channel: channel_id,
     text: attendanceString,
+  });
+
+  if (result.ok) {
+    const messageTs = result.ts;
+    channelIdToMessageTs[channel_id] = messageTs;
+  }
+}
+
+const throttledUpdateMessage = _.throttle(updateMessage, 3000);
+
+async function updateMessage(channelId) {
+  const attendanceString = await getAttendanceString(channelId);
+  const messageTs = channelIdToMessageTs[channelId];
+
+  await app.client.chat.update({
+    channel: channelId,
+    text: attendanceString,
+    ts: messageTs,
   });
 }
 
@@ -139,7 +163,7 @@ app.command("/tally", async ({ command, ack, context }) => {
       await deleteBotMessages(channel_id);
     } else {
       channelsRequestedSet.add(channel_id);
-      await postMessageInChannel(channel_id);
+      await postMessage(channel_id);
     }
   } catch (error) {
     console.error('Failed to process "/tally" command:', error);
