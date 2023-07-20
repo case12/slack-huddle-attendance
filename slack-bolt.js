@@ -8,7 +8,8 @@ const channelIdToMessageTs = {};
 
 // Variables to grab the botId and botUserId for filtering / deleting bot messages
 let botId;
-let botUserId;
+
+const DEBUG = false;
 
 const app = new App({
   token: process.env.BOT_TOKEN,
@@ -60,38 +61,106 @@ async function updateMonitoredChannels() {
   );
 }
 
-async function getAttendanceString(channel_id) {
+function getMemberNameInfoFields(member) {
+  return {
+    name: member.name,
+    real_name: member.real_name,
+    real_name_normalized: member.profile.real_name_normalized,
+    display_name: member.profile.display_name,
+    first_name: member.profile.first_name,
+    last_name: member.profile.last_name,
+  };
+}
+
+function getBlockFromMemberInfo(memberInfo) {
+  const name = memberInfo.real_name;
+  const statusText = memberInfo.profile.status_text;
+  const statusEmoji = memberInfo.profile.status_emoji;
+
+  return {
+    type: "context",
+    elements: [
+      {
+        type: "image",
+        image_url: memberInfo.profile.image_32,
+        alt_text: name,
+      },
+      {
+        type: "plain_text",
+        emoji: true,
+        text: `${name}${statusText ? ` | ${statusText}` : ""}${
+          statusEmoji ? ` | ${statusEmoji}` : ""
+        }`,
+      },
+    ],
+  };
+}
+
+async function getAttendanceBlocks(channel_id) {
   const channelMemberIds = await getChannelMemberIds(channel_id);
 
   const memberInfoPromises = channelMemberIds.map((memberId) =>
     getMemberInfo(memberId)
   );
   const memberInfoResults = await Promise.all(memberInfoPromises);
-  const channelMessage = memberInfoResults
-    .map((memberInfo) =>
-      memberInfo.id !== botUserId &&
-      memberInfo.profile.huddle_state !== "in_a_huddle"
-        ? `${
-            memberInfo.profile.display_name ||
-            memberInfo.profile.last_name ||
-            memberInfo.profile.first_name
-          }?`
-        : undefined
-    )
-    .filter((v) => v)
-    .sort()
-    .join(" ");
 
-  return channelMessage;
+  if (DEBUG) {
+    console.log(
+      memberInfoResults
+        .filter((m) => m.real_name.includes("Zach"))
+        .map((m) => m.profile.status_emoji_display_info)
+    );
+
+    console.log(memberInfoResults);
+    // console.log(memberInfoResults.map(getMemberNameInfoFields));
+  }
+
+  const memberBlocks = memberInfoResults
+    .sort((m) => m.real_name)
+    .filter((m) => !m.is_bot && m.profile.huddle_state !== "in_a_huddle")
+    .map(getBlockFromMemberInfo);
+
+  return _.compact([
+    memberBlocks.length === 0 && {
+      type: "section",
+      text: {
+        type: "plain_text",
+        text: "Bueller?",
+      },
+    },
+    ...memberBlocks,
+    {
+      type: "actions",
+      block_id: "actions1",
+      elements: [
+        {
+          type: "button",
+          text: {
+            type: "plain_text",
+            emoji: true,
+            text: ":sports-car:",
+          },
+          value: "button_close",
+          action_id: "button_close",
+        },
+      ],
+    },
+  ]);
 }
 
 async function postMessage(channel_id) {
   await deleteBotMessages(channel_id);
-  const attendanceString = await getAttendanceString(channel_id);
+  const attendanceBlocks = await getAttendanceBlocks(channel_id);
+
+  if (DEBUG) {
+    console.log(attendanceBlocks);
+    return;
+  }
 
   const result = await app.client.chat.postMessage({
     channel: channel_id,
-    text: attendanceString,
+    text: "Bueller?",
+    blocks: attendanceBlocks,
   });
 
   if (result.ok) {
@@ -103,13 +172,19 @@ async function postMessage(channel_id) {
 const throttledUpdateMessage = _.throttle(updateMessage, 3000);
 
 async function updateMessage(channelId) {
-  const attendanceString = await getAttendanceString(channelId);
+  const attendanceBlocks = await getAttendanceBlocks(channelId);
   const messageTs = channelIdToMessageTs[channelId];
+
+  if (DEBUG) {
+    console.log(attendanceBlocks);
+    return;
+  }
 
   await app.client.chat.update({
     channel: channelId,
-    text: attendanceString,
+    blocks: attendanceBlocks,
     ts: messageTs,
+    text: "Bueller?",
   });
 }
 
@@ -147,26 +222,32 @@ async function deleteBotMessages(channelId) {
   }
 }
 
-app.command("/tally", async ({ command, ack, context }) => {
+app.command("/bueller", async ({ command, ack, context }) => {
   try {
     await ack();
 
     botId = context.botId;
     botUserId = context.botUserId;
 
-    const { channel_id, text } = command;
+    const { channel_id } = command;
 
-    const argumentsArray = text.split(" ");
-
-    if (argumentsArray.includes("off")) {
-      channelsRequestedSet.delete(channel_id);
-      await deleteBotMessages(channel_id);
-    } else {
-      channelsRequestedSet.add(channel_id);
-      await postMessage(channel_id);
-    }
+    channelsRequestedSet.add(channel_id);
+    await postMessage(channel_id);
   } catch (error) {
-    console.error('Failed to process "/tally" command:', error);
+    console.error('Failed to process "/bueller" command:', error);
+  }
+});
+
+app.action("button_close", async ({ ack, body }) => {
+  try {
+    await ack();
+
+    const channelId = body.channel.id;
+
+    channelsRequestedSet.delete(channelId);
+    await deleteBotMessages(channelId);
+  } catch (error) {
+    console.error("Error handling button press:", error);
   }
 });
 
