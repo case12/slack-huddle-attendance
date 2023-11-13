@@ -5,6 +5,7 @@ require("dotenv").config();
 // Keep track of all the channels that a tally has been requested
 const channelsRequestedSet = new Set();
 const channelIdToMessageTs = {};
+const channelIdToCloseBotTimeoutId = {};
 
 // Variables to grab the botId and botUserId for filtering / deleting bot messages
 let botId;
@@ -54,11 +55,15 @@ async function getMemberInfo(memberId) {
 }
 
 async function updateMonitoredChannels() {
-  await Promise.all(
-    Array.from(channelsRequestedSet).map((channelId) =>
-      throttledUpdateMessage(channelId)
-    )
-  );
+  try {
+    await Promise.all(
+      Array.from(channelsRequestedSet).map((channelId) =>
+        throttledUpdateMessage(channelId)
+      )
+    );
+  } catch (error) {
+    console.error("Failed updating monitored channels", error);
+  }
 }
 
 function getMemberNameInfoFields(member) {
@@ -149,43 +154,51 @@ async function getAttendanceBlocks(channel_id) {
 }
 
 async function postMessage(channel_id) {
-  await deleteBotMessages(channel_id);
-  const attendanceBlocks = await getAttendanceBlocks(channel_id);
+  try {
+    await deleteBotMessages(channel_id);
+    const attendanceBlocks = await getAttendanceBlocks(channel_id);
 
-  if (DEBUG) {
-    console.log(attendanceBlocks);
-    return;
-  }
+    if (DEBUG) {
+      console.log(attendanceBlocks);
+      return;
+    }
 
-  const result = await app.client.chat.postMessage({
-    channel: channel_id,
-    text: "Bueller?",
-    blocks: attendanceBlocks,
-  });
+    const result = await app.client.chat.postMessage({
+      channel: channel_id,
+      text: "Bueller?",
+      blocks: attendanceBlocks,
+    });
 
-  if (result.ok) {
-    const messageTs = result.ts;
-    channelIdToMessageTs[channel_id] = messageTs;
+    if (result.ok) {
+      const messageTs = result.ts;
+      channelIdToMessageTs[channel_id] = messageTs;
+    }
+  } catch (error) {
+    console.error(`Failed to post message in channel ${channel_id}`, error);
   }
 }
 
 const throttledUpdateMessage = _.throttle(updateMessage, 3000);
 
 async function updateMessage(channelId) {
-  const attendanceBlocks = await getAttendanceBlocks(channelId);
-  const messageTs = channelIdToMessageTs[channelId];
+  try {
+    const attendanceBlocks = await getAttendanceBlocks(channelId);
+    const messageTs = channelIdToMessageTs[channelId];
 
-  if (DEBUG) {
-    console.log(attendanceBlocks);
-    return;
+    if (DEBUG) {
+      console.log(attendanceBlocks);
+      return;
+    }
+
+    await app.client.chat.update({
+      channel: channelId,
+      blocks: attendanceBlocks,
+      ts: messageTs,
+      text: "Bueller?",
+    });
+  } catch (error) {
+    console.error(`Failed to update message in channel ${channelId}`, error);
   }
-
-  await app.client.chat.update({
-    channel: channelId,
-    blocks: attendanceBlocks,
-    ts: messageTs,
-    text: "Bueller?",
-  });
 }
 
 async function deleteBotMessages(channelId) {
@@ -194,6 +207,10 @@ async function deleteBotMessages(channelId) {
       channel: channelId,
       limit: 100,
     });
+
+    if (DEBUG) {
+      console.log(`Delete bot messages in channel ${channelId}`);
+    }
 
     if (result.ok) {
       const messages = result.messages;
@@ -233,6 +250,13 @@ app.command("/bueller", async ({ command, ack, context }) => {
 
     channelsRequestedSet.add(channel_id);
     await postMessage(channel_id);
+
+    clearTimeout(channelIdToCloseBotTimeoutId[channel_id]);
+
+    channelIdToCloseBotTimeoutId[channel_id] = setTimeout(() => {
+      channelsRequestedSet.delete(channel_id);
+      deleteBotMessages(channel_id);
+    }, 120000);
   } catch (error) {
     console.error('Failed to process "/bueller" command:', error);
   }
@@ -251,10 +275,24 @@ app.action("button_close", async ({ ack, body }) => {
   }
 });
 
-app.event("user_huddle_changed", updateMonitoredChannels);
+async function monitorChannelsRequested() {
+  // Regular function wrapper for the async function
+  function timerCallbackWrapper() {
+    updateMonitoredChannels().catch((error) => {
+      console.error("Error in asyncTimerCallback:", error);
+    });
+  }
+
+  // Start the timer
+  setInterval(timerCallbackWrapper, 3000); // 3000 ms = 3 seconds
+}
+
+// app.event("user_huddle_changed", updateMonitoredChannels);
 
 (async () => {
   await app.start();
+
+  await monitorChannelsRequested();
 
   console.log("⚡️ Bolt app is running!");
 })();
